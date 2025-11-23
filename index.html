@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>企业级数据血缘分析系统 Pro+</title>
+    <link rel="stylesheet" href="//unpkg.com/element-plus/dist/index.css" />
+    <style>
+        /* 基础布局 */
+        body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f5f7fa; }
+        #app { height: 100%; display: flex; flex-direction: column; }
+        
+        /* 顶部深色导航 */
+        .header { height: 56px; background: #0f172a; color: white; padding: 0 24px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 10px rgba(0,0,0,0.2); z-index: 100; }
+        .logo { font-size: 18px; font-weight: 600; letter-spacing: 0.5px; display: flex; align-items: center; gap: 8px; }
+        .tag-badge { background: #3b82f6; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
+
+        /* 主容器 */
+        .container { flex: 1; display: flex; overflow: hidden; }
+        
+        /* 左侧侧边栏 */
+        .sidebar { width: 400px; background: #ffffff; display: flex; flex-direction: column; border-right: 1px solid #e2e8f0; z-index: 10; box-shadow: 4px 0 15px rgba(0,0,0,0.03); }
+        .search-area { padding: 20px; border-bottom: 1px solid #f1f5f9; background: #fff; }
+        .table-wrapper { flex: 1; overflow-y: auto; }
+        
+        /* 表格优化 */
+        .el-table { --el-table-header-bg-color: #f8fafc; --el-table-row-hover-bg-color: #f1f5f9; }
+        .field-name { color: #0ea5e9; font-weight: 500; font-family: 'Consolas', monospace; }
+        .logic-tag { background: #fff7ed; color: #c2410c; border: 1px solid #ffedd5; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
+
+        /* 右侧画布 */
+        .main-content { flex: 1; position: relative; background: #f8fafc; overflow: hidden; }
+        /* 点状网格背景 */
+        #mountNode { width: 100%; height: 100%; background-image: radial-gradient(#cbd5e1 1.5px, transparent 1.5px); background-size: 24px 24px; }
+        
+        /* 空状态 */
+        .empty-state { position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%); text-align: center; opacity: 0.6; }
+        .empty-state h2 { margin: 0 0 10px 0; color: #64748b; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="header">
+            <div class="logo">
+                <span>🛡️ Data Lineage</span>
+                <span class="tag-badge">Enterprise</span>
+            </div>
+            <div style="font-size: 12px; color: #94a3b8;">Connected to DB</div>
+        </div>
+
+        <div class="container">
+            <div class="sidebar">
+                <div class="search-area">
+                    <el-button type="primary" color="#0f172a" icon="el-icon-upload" style="width: 100%; margin-bottom: 15px; height: 40px;" @click="dialogVisible = true">
+                        + 解析 SQL 脚本
+                    </el-button>
+                    <el-input v-model="searchText" placeholder="搜索表名 / 字段名..." clearable @input="fetchNodes">
+                        <template #prefix><el-icon><Search /></el-icon></template>
+                    </el-input>
+                </div>
+                
+                <div class="table-wrapper">
+                    <el-table :data="tableData" style="width: 100%" @row-click="handleRowClick" highlight-current-row size="default">
+                        <el-table-column prop="table_name" label="表名" width="120" show-overflow-tooltip>
+                            <template #default="scope"><span style="font-weight:600; color:#334155">{{ scope.row.table_name }}</span></template>
+                        </el-table-column>
+                        <el-table-column prop="column_name" label="字段名" min-width="100" show-overflow-tooltip>
+                            <template #default="scope"><span class="field-name">● {{ scope.row.column_name }}</span></template>
+                        </el-table-column>
+                        <el-table-column label="逻辑" width="70" align="center">
+                            <template #default="scope">
+                                <span v-if="scope.row.logic_types" class="logic-tag">{{ scope.row.logic_types.substring(0,1) }}</span>
+                            </template>
+                        </el-table-column>
+                    </el-table>
+                </div>
+            </div>
+
+            <div class="main-content" v-loading="loadingGraph">
+                <div v-if="!currentSelectNode" class="empty-state">
+                    <h2>👈 请选择左侧字段</h2>
+                    <p>点击字段以查看完整的数据血缘流向图</p>
+                </div>
+                <div id="mountNode"></div>
+            </div>
+        </div>
+
+        <el-dialog v-model="dialogVisible" title="SQL 解析" width="600px">
+            <el-input v-model="sqlInput" type="textarea" :rows="10" placeholder="请输入 SQL..." style="font-family: monospace;"></el-input>
+            <template #footer>
+                <el-button @click="dialogVisible = false">取消</el-button>
+                <el-button type="primary" color="#0f172a" @click="submitSQL" :loading="parsing">开始解析</el-button>
+            </template>
+        </el-dialog>
+    </div>
+
+    <script src="//unpkg.com/vue@3"></script>
+    <script src="//unpkg.com/element-plus"></script>
+    <script src="//unpkg.com/@element-plus/icons-vue"></script>
+    <script src="https://unpkg.com/@antv/g6@4.8.24/dist/g6.min.js"></script>
+    <script src="//unpkg.com/axios/dist/axios.min.js"></script>
+
+    <script>
+        const { createApp, ref, onMounted, nextTick } = Vue;
+
+        createApp({
+            setup() {
+                const tableData = ref([]);
+                const searchText = ref('');
+                const loadingTable = ref(false);
+                const loadingGraph = ref(false);
+                const currentSelectNode = ref(null);
+                const dialogVisible = ref(false);
+                const sqlInput = ref('');
+                const parsing = ref(false);
+                let graph = null;
+
+                // 1. 注册自定义卡片节点
+                if (typeof G6 !== 'undefined') {
+                    G6.registerNode('custom-card', {
+                        draw: (cfg, group) => {
+                            const w = 200;
+                            const h = 64;
+                            const r = 6;
+                            const color = cfg.style.stroke || '#5B8FF9'; 
+                            const bgColor = '#ffffff'; 
+
+                            // 外框
+                            const shape = group.addShape('rect', {
+                                attrs: {
+                                    x: -w / 2, y: -h / 2, width: w, height: h,
+                                    stroke: color, lineWidth: 1, fill: bgColor, radius: r,
+                                    shadowColor: '#e2e8f0', shadowBlur: 10, shadowOffsetX: 2, shadowOffsetY: 2
+                                },
+                                name: 'main-box'
+                            });
+
+                            // 左侧色条
+                            group.addShape('rect', {
+                                attrs: {
+                                    x: -w / 2, y: -h / 2, width: 6, height: h,
+                                    fill: color, radius: [r, 0, 0, r]
+                                },
+                                name: 'left-border'
+                            });
+
+                            // 表名
+                            group.addShape('text', {
+                                attrs: {
+                                    text: cfg.label,
+                                    x: -w / 2 + 16, y: -h / 2 + 20,
+                                    fontSize: 14, fontWeight: 700, fill: '#1e293b', textAlign: 'left', textBaseline: 'middle'
+                                },
+                                name: 'title-text'
+                            });
+
+                            // 字段名
+                            group.addShape('text', {
+                                attrs: {
+                                    text: cfg.description,
+                                    x: -w / 2 + 16, y: -h / 2 + 44,
+                                    fontSize: 13, fontFamily: 'Consolas', fill: '#64748b', textAlign: 'left', textBaseline: 'middle'
+                                },
+                                name: 'desc-text'
+                            });
+                            return shape;
+                        }
+                    });
+                }
+
+                const fetchNodes = async () => {
+                    loadingTable.value = true;
+                    try {
+                        const res = await axios.get(`http://localhost:5000/api/nodes?q=${searchText.value}`);
+                        tableData.value = res.data;
+                    } catch (err) { console.error(err); } finally { loadingTable.value = false; }
+                };
+
+                const initGraph = () => {
+                    const container = document.getElementById('mountNode');
+                    
+                    graph = new G6.Graph({
+                        container: 'mountNode',
+                        width: container.offsetWidth,
+                        height: container.offsetHeight,
+                        fitView: true,
+                        fitViewPadding: 60,
+                        animate: false, // 【核心修复】：禁用动画，确保 fitView 计算准确
+                        modes: { default: ['drag-canvas', 'zoom-canvas', 'drag-node'] },
+                        layout: {
+                            type: 'dagre',
+                            rankdir: 'LR', 
+                            align: 'UL', 
+                            nodesep: 30,
+                            ranksep: 120 
+                        },
+                        defaultNode: { type: 'custom-card' },
+                        defaultEdge: {
+                            type: 'cubic-horizontal',
+                            style: { 
+                                stroke: '#94a3b8', 
+                                lineWidth: 1.5, 
+                                endArrow: { path: G6.Arrow.vee(8, 10, 5), fill: '#94a3b8' } 
+                            },
+                            labelCfg: { 
+                                autoRotate: true,
+                                style: {
+                                    fill: '#3b82f6',
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    background: {
+                                        fill: '#eff6ff',
+                                        stroke: '#bfdbfe',
+                                        padding: [4, 8],
+                                        radius: 12
+                                    }
+                                } 
+                            }
+                        }
+                    });
+
+                    // 监听容器大小变化
+                    if (typeof ResizeObserver !== 'undefined') {
+                        const ro = new ResizeObserver(entries => {
+                            if (!graph || graph.get('destroyed')) return;
+                            if (entries && entries.length > 0) {
+                                const { width, height } = entries[0].contentRect;
+                                graph.changeSize(width, height);
+                                graph.fitView();
+                            }
+                        });
+                        ro.observe(container);
+                    }
+                };
+
+                const handleRowClick = async (row) => {
+                    currentSelectNode.value = row;
+                    loadingGraph.value = true;
+                    try {
+                        const res = await axios.get(`http://localhost:5000/api/lineage/${row.node_id}`);
+                        const data = res.data;
+
+                        const g6Nodes = data.nodes.map(n => {
+                            let color = '#3b82f6'; 
+                            if (n.id === String(row.node_id)) color = '#f59e0b'; 
+                            else if (n.node_type === 'SOURCE') color = '#10b981'; 
+
+                            return {
+                                id: n.id,
+                                label: n.full_info.table_name,
+                                description: n.full_info.column_name,
+                                style: { stroke: color } 
+                            };
+                        });
+
+                        const g6Data = { nodes: g6Nodes, edges: data.edges };
+                        
+                        if(!graph) initGraph();
+                        
+                        // 【核心修复】：数据重绘流程
+                        // 1. 先清空，防止旧数据残留干扰布局
+                        graph.clear(); 
+                        
+                        // 2. 装载新数据
+                        graph.data(g6Data);
+                        
+                        // 3. 渲染 (因为 animate:false，这是同步或极快的)
+                        graph.render();
+
+                        // 4. 强制适配视图
+                        // 立即执行一次
+                        graph.fitView(); 
+                        
+                        // 双重保险：等待 Vue DOM 更新和 G6 内部绘制队列完成后再执行一次
+                        nextTick(() => {
+                            setTimeout(() => {
+                                graph.fitView(); 
+                            }, 50); 
+                        });
+
+                    } catch (err) { console.error(err); } finally { loadingGraph.value = false; }
+                };
+
+                const submitSQL = async () => {
+                    if (!sqlInput.value.trim()) return;
+                    parsing.value = true;
+                    try {
+                        const res = await axios.post('http://localhost:5000/api/parse', { sql: sqlInput.value });
+                        if (res.data.status === 'success') { 
+                            dialogVisible.value = false; sqlInput.value = ''; fetchNodes(); 
+                            ElementPlus.ElMessage.success('解析成功');
+                        }
+                    } catch (err) { ElementPlus.ElMessage.error('解析失败'); } finally { parsing.value = false; }
+                };
+
+                onMounted(() => { fetchNodes(); });
+                return { tableData, searchText, loadingTable, loadingGraph, currentSelectNode, fetchNodes, handleRowClick, dialogVisible, sqlInput, parsing, submitSQL };
+            }
+        }).use(ElementPlus).mount('#app');
+    </script>
+</body>
+</html>
